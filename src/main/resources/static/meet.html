@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Meeting</title>
+  <link rel="stylesheet" href="/css/styles.css">
+  <style>
+    body { font-family: 'Arial', sans-serif; background: #f5f6fa; margin:0; display:flex; flex-direction:column; align-items:center; }
+    h2 { margin-top:20px;color:#333; }
+    #controls { margin:20px; display:flex; flex-wrap:wrap; justify-content:center; gap:10px; }
+    input { padding:8px; font-size:16px; border-radius:5px; border:1px solid #ccc; }
+    button { padding:8px 16px; font-size:16px; cursor:pointer; border:none; border-radius:5px; background:#1e90ff; color:white; transition:0.2s; }
+    button:hover{background:#0077cc;}
+    #roomInfo { margin:10px; color:#555; font-weight:bold; }
+    #videos { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:10px; width:95%; max-width:1200px; margin-bottom:30px; }
+    video { width:100%; height:auto; border-radius:10px; border:2px solid #1e90ff; background:black; }
+  </style>
+</head>
+<body>
+
+<h2>Video Meeting</h2>
+
+<div id="controls">
+  <button id="createBtn">Start New Meeting</button>
+  <input type="text" id="joinId" placeholder="Enter Meeting ID">
+  <button id="joinBtn">Join Meeting</button>
+</div>
+
+<div id="roomInfo">
+  Room ID: <span id="roomIdText">N/A</span>
+  <button id="copyBtn">Copy Link</button>
+</div>
+
+<div id="videos">
+  <video id="localVideo" autoplay muted></video>
+</div>
+
+<script src="https://unpkg.com/simple-peer@latest/simplepeer.min.js"></script>
+<script>
+  const createBtn = document.getElementById('createBtn');
+  const joinBtn = document.getElementById('joinBtn');
+  const joinIdInput = document.getElementById('joinId');
+  const localVideo = document.getElementById('localVideo');
+  const videosContainer = document.getElementById('videos');
+  const roomIdText = document.getElementById('roomIdText');
+  const copyBtn = document.getElementById('copyBtn');
+
+  let socket;
+  let username = JSON.parse(localStorage.getItem('connectedUser')).username;
+  let roomId;
+  let localStream;
+  let peers = {}; // username -> SimplePeer instance
+
+  async function initMedia() {
+    localStream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+    localVideo.srcObject = localStream;
+  }
+
+  function addRemoteVideo(user, stream) {
+    if(document.getElementById(`video-${user}`)) return;
+    const video = document.createElement('video');
+    video.id = `video-${user}`;
+    video.autoplay = true;
+    video.srcObject = stream;
+    videosContainer.appendChild(video);
+  }
+
+  function connectWebSocket() {
+    socket = new WebSocket(`ws://${window.location.hostname}:8080/signal`);
+    socket.onopen = ()=>console.log('Connected to signaling server');
+
+    socket.onmessage = event=>{
+      const msg = JSON.parse(event.data);
+      if(!msg.roomId || msg.roomId !== roomId) return;
+      const from = msg.from;
+      const signal = msg.signal;
+      if(from===username) return;
+
+      if(!peers[from]){
+        const peer = new SimplePeer({initiator:false,trickle:false,stream:localStream});
+        peers[from]=peer;
+        peer.on('signal', data=>socket.send(JSON.stringify({roomId, from:username, signal:data})));
+        peer.on('stream', stream=>addRemoteVideo(from,stream));
+      }
+      peers[from].signal(signal);
+    };
+  }
+
+  async function createMeeting(){
+    await initMedia();
+    const res = await fetch(`/api/v1/meetings/create?username=${username}`,{method:'POST'});
+    roomId = await res.text();
+    roomIdText.innerText = roomId;
+    connectWebSocket();
+
+    peers[username]=new SimplePeer({initiator:true,trickle:false,stream:localStream});
+    peers[username].on('signal', data=>socket.send(JSON.stringify({roomId, from:username, signal:data})));
+  }
+
+  async function joinMeeting(){
+    await initMedia();
+    roomId = joinIdInput.value.trim();
+    if(!roomId){alert("Enter Meeting ID"); return;}
+    const res = await fetch(`/api/v1/meetings/join?roomId=${roomId}&username=${username}`,{method:'POST'});
+    if(!res.ok){alert("Room not found!"); return;}
+    roomIdText.innerText = roomId;
+    connectWebSocket();
+
+    peers[username]=new SimplePeer({initiator:true,trickle:false,stream:localStream});
+    peers[username].on('signal', data=>socket.send(JSON.stringify({roomId, from:username, signal:data})));
+  }
+
+  createBtn.addEventListener('click', createMeeting);
+  joinBtn.addEventListener('click', joinMeeting);
+  copyBtn.addEventListener('click',()=>{
+    const link = `${window.location.origin}/meet.html?action=join&roomId=${roomId}&username=${username}`;
+    navigator.clipboard.writeText(link).then(()=>alert('Meeting link copied!'));
+  });
+
+  // Auto join/create if URL params exist
+  const urlParams = new URLSearchParams(window.location.search);
+  const action = urlParams.get('action');
+  const roomIdFromUrl = urlParams.get('roomId');
+  const usernameFromUrl = urlParams.get('username');
+  if(usernameFromUrl) username=usernameFromUrl;
+  if(action==='create') createMeeting();
+  else if(action==='join' && roomIdFromUrl){ joinIdInput.value=roomIdFromUrl; joinMeeting(); }
+
+</script>
+</body>
+</html>
